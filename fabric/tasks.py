@@ -409,6 +409,28 @@ def execute(task, *args, **kwargs):
             # This prevents Fabric from continuing on to any other tasks.
             # Otherwise, pull in results from the child run.
             ran_jobs = jobs.run()
+
+            from collections import Counter
+            c = Counter()
+            failed_hosts = []
+            non_executed_hosts = []
+            for name, d in ran_jobs.iteritems():
+                if d['exit_code'] == 0:
+                    c[0] += 1
+                elif d['exit_code'] is None:
+                    c[-1] += 1
+                    non_executed_hosts.append(name)
+                else:
+                    c[1] += 1
+                    failed_hosts.append(name)
+
+            print "----"
+            print "success: %s, failure: %s, not executed: %s" % (c[0], c[1], c[-1])
+            if non_executed_hosts:
+                print "\nnon executed hosts: \n%s" % ("\n".join(non_executed_hosts))
+            if failed_hosts:
+                print "\nfailed_hosts: \n%s" % ("\n".join(failed_hosts))
+
             for name, d in ran_jobs.iteritems():
                 if d['exit_code'] != 0:
                     if isinstance(d['results'], NetworkError) and \
