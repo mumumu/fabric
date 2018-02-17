@@ -32,7 +32,7 @@ class JobQueue(object):
         ___________________________
                                 End 
     """
-    def __init__(self, max_running, comms_queue):
+    def __init__(self, max_running, comms_queue, max_fail_percentage=0):
         """
         Setup the class to resonable defaults.
         """
@@ -41,6 +41,8 @@ class JobQueue(object):
         self._completed = []
         self._num_of_jobs = 0
         self._max = max_running
+        self._max_fail_percentage = max_fail_percentage
+        self._max_fail_jobs = 0
         self._comms_queue = comms_queue
         self._finished = False
         self._closed = False
@@ -69,6 +71,12 @@ class JobQueue(object):
         """
         if self._debug:
             print("job queue closed.")
+
+        if self._max_fail_percentage > 0:
+            import math
+            self._max_fail_jobs = math.ceil(self._max * (self._max_fail_percentage / 100.0))
+            if self._debug:
+                print("max fail jobs: %d" % self._max_fail_jobs)
 
         self._closed = True
 
@@ -136,9 +144,9 @@ class JobQueue(object):
             _advance_the_queue()
 
         # Main loop!
+        failed_job = 0
+        too_many_errors = False
         while not self._finished:
-            while len(self._running) < self._max and self._queued:
-                _advance_the_queue()
 
             if not self._all_alive():
                 for id, job in enumerate(self._running):
@@ -148,9 +156,22 @@ class JobQueue(object):
                                     job.name)
                         done = self._running.pop(id)
                         self._completed.append(done)
+                        if isinstance(done, Process) and job.exitcode != 0:
+                            failed_job += 1
+                            if self._max_fail_jobs > 0 and failed_job >= self._max_fail_jobs:
+                                too_many_errors = True
+                        else:
+                            if not too_many_errors:
+                                if len(self._running) < self._max and self._queued:
+                                    _advance_the_queue()
 
                 if self._debug:
                     print("Job queue has %d running." % len(self._running))
+
+            if not self._running and too_many_errors:
+                if self._debug:
+                    print("the number of failed job exceeded the threshold.")
+                self._finished = True
 
             if not (self._queued or self._running):
                 if self._debug:

@@ -197,6 +197,14 @@ env_options = [
         help="print line-by-line instead of byte-by-byte"
     ),
 
+    make_option('--max-fail-percentage',
+        dest='max_fail_percentage',
+        type='int',
+        metavar='INT',
+        default=0,
+        help="number of fail rate of pool-size in parallel mode"
+    ),
+
     make_option('-n', '--connection-attempts',
         type='int',
         metavar='M',
