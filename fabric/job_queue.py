@@ -89,56 +89,10 @@ class JobQueue(object):
             if self._debug:
                 print("job queue appended %s." % process.name)
 
-    def run(self):
-        """
-        This is the workhorse. It will take the intial jobs from the _queue,
-        start them, add them to _running, and then go into the main running
-        loop.
-
-        This loop will check for done procs, if found, move them out of
-        _running into _completed. It also checks for a _running queue with open
-        spots, which it will then fill as discovered.
-
-        To end the loop, there have to be no running procs, and no more procs
-        to be run in the queue.
-
-        This function returns an iterable of all its children's exit codes.
-        """
-        def _advance_the_queue():
-            """
-            Helper function to do the job of poping a new proc off the queue
-            start it, then add it to the running queue. This will eventually
-            depleate the _queue, which is a condition of stopping the running
-            while loop.
-
-            It also sets the env.host_string from the job.name, so that fabric
-            knows that this is the host to be making connections on.
-            """
-            job = self._queued.pop()
-            if self._debug:
-                print("Popping '%s' off the queue and starting it" % job.name)
-            with settings(clean_revert=True, host_string=job.name, host=job.name):
-                job.start()
-            self._running.append(job)
-
-        # Prep return value so we can start filling it during main loop
-        results = {}
-        for job in self._queued:
-            results[job.name] = dict.fromkeys(('exit_code', 'results'))
-
-        if not self._closed:
-            raise Exception("Need to close() before starting.")
-
-        if self._debug:
-            print("Job queue starting.")
-
-        while len(self._running) < self._max:
-            _advance_the_queue()
-
-        # Main loop!
+    def _main_loop(self, results):
         while not self._finished:
             while len(self._running) < self._max and self._queued:
-                _advance_the_queue()
+                self._advance_the_queue()
 
             if not self._all_alive():
                 for id, job in enumerate(self._running):
@@ -168,6 +122,55 @@ class JobQueue(object):
 
             time.sleep(ssh.io_sleep)
 
+    def _advance_the_queue(self):
+        """
+        Helper function to do the job of poping a new proc off the queue
+        start it, then add it to the running queue. This will eventually
+        depleate the _queue, which is a condition of stopping the running
+        while loop.
+
+        It also sets the env.host_string from the job.name, so that fabric
+        knows that this is the host to be making connections on.
+        """
+        job = self._queued.pop()
+        if self._debug:
+            print("Popping '%s' off the queue and starting it" % job.name)
+        with settings(clean_revert=True, host_string=job.name, host=job.name):
+            job.start()
+        self._running.append(job)
+
+    def run(self):
+        """
+        This is the workhorse. It will take the intial jobs from the _queue,
+        start them, add them to _running, and then go into the main running
+        loop.
+
+        This loop will check for done procs, if found, move them out of
+        _running into _completed. It also checks for a _running queue with open
+        spots, which it will then fill as discovered.
+
+        To end the loop, there have to be no running procs, and no more procs
+        to be run in the queue.
+
+        This function returns an iterable of all its children's exit codes.
+        """
+        # Prep return value so we can start filling it during main loop
+        results = {}
+        for job in self._queued:
+            results[job.name] = dict.fromkeys(('exit_code', 'results'))
+
+        if not self._closed:
+            raise Exception("Need to close() before starting.")
+
+        if self._debug:
+            print("%s: Job queue starting." % self.__class__.__name__)
+
+        while len(self._running) < self._max:
+            self._advance_the_queue()
+
+        # Main loop!
+        self._main_loop(results)
+
         # Consume anything left in the results queue. Note that there is no
         # need to block here, as the main loop ensures that all workers will
         # already have finished.
@@ -191,6 +194,100 @@ class JobQueue(object):
                 results[datum['name']]['results'] = datum['result']
             except Queue.Empty:
                 break
+
+
+class GroupJobQueue(JobQueue):
+    """
+    The goal of this class is to make a queue of processes to run, and go
+    through them running X number GROUP sequentially. This behavior is desirable
+    in some situation, such as rolling updates.
+
+        Start
+        ...........................
+        [~~~~~]....................
+        _______[~~~~~].............
+        ______________[~~~~~]......
+        _____________________[~~~~]
+        ___________________________
+                                End 
+
+    You can specify max_fail_percentage on constructor. If you specify this 
+    value > 0, you can abort next group if max_fail_percentage of X is failed.
+
+    For example, X = 10 and max_fail_percentage = 20, if more than 2 of the 10
+    servers were to fail, next group running will be aborted.
+    """
+    def __init__(self, max_running, comms_queue, max_fail_percentage=0):
+        self._max_fail_percentage = max_fail_percentage
+        self._max_fail_jobs = 0
+        super(GroupJobQueue, self).__init__(max_running, comms_queue)
+
+    def close(self):
+        """
+        A sanity check, so that the need to care about new jobs being added in
+        the last throws of the job_queue's run are negated.
+        """
+        if self._debug:
+            print("job queue closed.")
+
+        if self._max_fail_percentage > 0:
+            import math
+            self._max_fail_jobs = math.ceil(self._max * (self._max_fail_percentage / 100.0))
+            if self._debug:
+                print("max fail jobs: %d" % self._max_fail_jobs)
+
+        self._closed = True
+
+    def _main_loop(self, results):
+        failed_job = 0
+        too_many_errors = False
+        while not self._finished:
+            if self._queued and not self._running and not too_many_errors:
+                if self._debug:
+                    print("---- try next batch group.")
+                    print("---- previous group error is %d, threshold is %d" % (failed_job, self._max_fail_jobs))
+                while len(self._running) < self._max and self._queued:
+                    self._advance_the_queue()
+                failed_job = 0
+
+            if not self._all_alive():
+                for id, job in enumerate(self._running):
+                    if not job.is_alive():
+                        if self._debug:
+                            print("Job queue found finished proc: %s." %
+                                    job.name)
+                        done = self._running.pop(id)
+                        self._completed.append(done)
+                        if isinstance(done, Process) and job.exitcode != 0:
+                            failed_job += 1
+                            if self._debug:
+                                print(job.name + " failed performing task")
+                            if self._max_fail_jobs > 0 and failed_job >= self._max_fail_jobs:
+                                too_many_errors = True
+                                if self._debug:
+                                    print("too many errors detected.")
+
+                if self._debug:
+                    print("Job queue has %d running." % len(self._running))
+
+            if not self._running and too_many_errors:
+                self._finished = True
+
+            if not (self._queued or self._running):
+                if self._debug:
+                    print("Job queue finished.")
+
+                for job in self._completed:
+                    job.join()
+
+                self._finished = True
+
+            # Each loop pass, try pulling results off the queue to keep its
+            # size down. At this point, we don't actually care if any results
+            # have arrived yet; they will be picked up after the main loop.
+            self._fill_results(results)
+
+            time.sleep(ssh.io_sleep)
 
 
 #### Sample

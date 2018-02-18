@@ -8,7 +8,7 @@ from fabric import state
 from fabric.utils import abort, warn, error
 from fabric.network import to_dict, disconnect_all
 from fabric.context_managers import settings
-from fabric.job_queue import JobQueue
+from fabric.job_queue import JobQueue, GroupJobQueue
 from fabric.task_utils import crawl, merge, parse_kwargs
 from fabric.exceptions import NetworkError
 
@@ -372,7 +372,10 @@ def execute(task, *args, **kwargs):
     pool_size = task.get_pool_size(my_env['all_hosts'], state.env.pool_size)
     # Set up job queue in case parallel is needed
     queue = multiprocessing.Queue() if parallel else None
-    jobs = JobQueue(pool_size, queue)
+    if state.env.enable_group_batch:
+        jobs = GroupJobQueue(pool_size, queue, state.env.max_group_fail_percentage)
+    else:
+        jobs = JobQueue(pool_size, queue)
     if state.output.debug:
         jobs._debug = True
 
@@ -409,6 +412,28 @@ def execute(task, *args, **kwargs):
             # This prevents Fabric from continuing on to any other tasks.
             # Otherwise, pull in results from the child run.
             ran_jobs = jobs.run()
+
+            from collections import Counter
+            c = Counter()
+            failed_hosts = []
+            non_executed_hosts = []
+            for name, d in ran_jobs.iteritems():
+                if d['exit_code'] == 0:
+                    c[0] += 1
+                elif d['exit_code'] is None:
+                    c[-1] += 1
+                    non_executed_hosts.append(name)
+                else:
+                    c[1] += 1
+                    failed_hosts.append(name)
+
+            print "----"
+            print "success: %s, failure: %s, not executed: %s" % (c[0], c[1], c[-1])
+            if non_executed_hosts:
+                print "\nnon executed hosts: \n%s" % ("\n".join(non_executed_hosts))
+            if failed_hosts:
+                print "\nfailed_hosts: \n%s" % ("\n".join(failed_hosts))
+
             for name, d in ran_jobs.iteritems():
                 if d['exit_code'] != 0:
                     if isinstance(d['results'], NetworkError) and \

@@ -135,6 +135,13 @@ env_options = [
         help="python module file to import, e.g. '../other.py'"
     ),
 
+    make_option('-G', '--group-batch',
+        action='store_true',
+        dest='enable_group_batch',
+        default=False,
+        help="enable batch group mode with parallel mode"
+    ),
+
     make_option('-g', '--gateway',
         default=None,
         metavar='HOST',
@@ -195,6 +202,14 @@ env_options = [
         action='store_true',
         default=False,
         help="print line-by-line instead of byte-by-byte"
+    ),
+
+    make_option('--max-group-fail-percentage',
+        dest='max_group_fail_percentage',
+        type='int',
+        metavar='INT',
+        default=0,
+        help="number of fail rate of pool-size in parallel mode"
     ),
 
     make_option('-n', '--connection-attempts',
